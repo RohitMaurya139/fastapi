@@ -17,6 +17,7 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI ,HTTPException, Path, Query
+from pydantic import BaseModel, EmailStr, Field, computed_field, field_validator
 
 # Create the FastAPI application instance.
 # `app` is the object uvicorn looks for (main:app).
@@ -60,7 +61,10 @@ def get_data():
     """
     with open("students.json", "r") as fs:
         return json.load(fs)
-
+#Helper Function 2.
+def save_data(data):
+    with open("students.json", "w") as file:
+        json.dump(data, file, indent=4) #indent=4 keeps the file readable
 
 @app.get("/get_all_student")
 def student():
@@ -339,3 +343,233 @@ def paginate_student(
         "total_student": total_std,
         "student": res,
     }
+
+# ---------------------------------------------------------------------------
+# REQUEST BODY MODELS (Pydantic)
+# ---------------------------------------------------------------------------
+# A Pydantic model describes the shape of the data a client sends.
+# When used as a parameter type in a POST/PUT route, FastAPI reads the JSON
+# body, validates it against the model and passes us a clean, typed object.
+# Invalid data is rejected automatically with HTTP 422.
+
+
+class Student(BaseModel):
+    """
+    Full student model used when CREATING a student (POST /create).
+
+    Every field is required (Field(...) marks it as required), so the client
+    must send all of them. Along with type checking, Field(...) adds rules:
+        - name:   2 to 50 characters
+        - age:    greater than 0 and less than-or-equal to 100
+        - course: at most 50 characters
+        - marks:  0 to 100 (inclusive)
+        - email:  must be a valid email address (EmailStr)
+
+    Extra behaviour:
+        - check_name() normalises the name and rejects digits/symbols.
+        - grade is a computed, read-only field derived from marks.
+    """
+
+    id      : str = Field(..., examples=["S001"])   # required; examples show in /docs
+    name    : str = Field(..., min_length=2, max_length=50)
+    age     : int = Field(..., gt=0, le=100)         # 0 < age <= 100
+    course  : str = Field(..., max_length=50)
+    marks   : int = Field(..., ge=0, le=100)         # 0 <= marks <= 100
+    email   : EmailStr                               # built-in email validation
+
+    # Custom validation rule for the "name" field only.
+    # Runs after type/length checks pass, before the value is stored.
+    @field_validator("name")  # e.g. name="Kabir singh"
+    @classmethod
+    def check_name(cls, value: str) -> str:
+        # Remove spaces first so "Rohit Maurya" is allowed, then require
+        # letters only (rejects "Rohit123" or "R0hit").
+        if not value.replace(" ", "").isalpha():
+            raise ValueError("Name must contain only letters and spaces")
+
+        # Normalise the stored value: "kabir singh" -> "Kabir Singh".
+        return value.title()
+
+    @computed_field
+    @property
+    def grade(self) -> str:
+        """
+        Read-only field derived from `marks` (never sent by the client).
+
+        @computed_field also includes "grade" in model_dump() output, so it
+        shows up in API responses; the value is recalculated on each access.
+        """
+        if self.marks >= 90:
+            return "A+"
+        elif self.marks >= 80:
+            return "A"
+        elif self.marks >= 70:
+            return "B"
+        elif self.marks >= 60:
+            return "C"
+        else:
+            return "F"
+
+# ---------------------------------------------------------------------------
+# CREATE (POST) - request body
+# ---------------------------------------------------------------------------
+# Because the parameter is typed as `Student`, FastAPI expects a JSON body and
+# validates it against the model. status_code=201 means "Created".
+
+
+@app.post('/create', status_code=201)
+def create_student(student: Student):
+    """
+    Create a new student.
+
+    Args:
+        student (Student): Validated request body.
+
+    Returns:
+        dict: Success message plus the created student (including grade).
+
+    Raises:
+        HTTPException 400: If a student with the same id already exists.
+
+    Status codes:
+        201 - Student created successfully.
+        400 - Duplicate id.
+        422 - Body failed validation (FastAPI handles this automatically).
+    """
+    data = get_data()
+
+    # Reject duplicates: students.json is keyed by student id.
+    if student.id in data:
+        raise HTTPException(status_code=400, detail=f"student ID' {student.id} already exist")
+
+    # Store the student WITHOUT "id" (it is the dict key) and without "grade"
+    # (it is derived from marks and recomputed on read).
+    data[student.id] = student.model_dump(exclude={"id", "grade"})
+    save_data(data)
+
+    return {"Message": "Student created Successfully", "Student": student}
+
+# ---------------------------------------------------------------------------
+# UPDATE (PUT) - partial update model
+# ---------------------------------------------------------------------------
+# For updates every field is optional: the client sends only what changes.
+# `Field(None, ...)` sets the default to None, which is what makes the field
+# optional. (Using Field(...) here would make it required and cause a 422.)
+
+
+class updateStudent(BaseModel):
+    """
+    Partial-update model used by PUT /update/{student_id}.
+
+    Every field defaults to None, so omitted fields are simply "not updated".
+    The endpoint uses model_dump(exclude_unset=True) to merge ONLY the fields
+    the client actually sent into the existing record.
+    """
+
+    name    : str | None = Field(None, min_length=2, max_length=50)
+    age     : int | None = Field(None, gt=0, le=100)
+    course  : str | None = Field(None, max_length=50)
+    marks   : int | None = Field(None, ge=0, le=100)
+    email   : EmailStr | None
+
+
+@app.put('/update/{student_id}')
+def update_student(
+    student_update: updateStudent,
+    student_id: str = Path(
+        ...,
+        description="Student ID must required",
+        examples=["S001"],
+    ),
+):
+    """
+    Update an existing student with only the fields that are provided.
+
+    Args:
+        student_update (updateStudent): Optional fields to change.
+        student_id (str): Path parameter identifying the student.
+
+    Returns:
+        dict: Success message plus the submitted changes.
+
+    Raises:
+        HTTPException 404: If no student exists with `student_id`.
+
+    Status codes:
+        200 - Student updated successfully.
+        404 - Student not found.
+        422 - Body/path failed validation (FastAPI handles this automatically).
+
+    How the partial merge works:
+        1. Load the current data.
+        2. exclude_unset=True keeps only the fields the client actually sent.
+        3. Copy those values onto the existing record.
+        4. Re-validate the merged record with the strict `Student` model so
+           bad results are caught before saving.
+    """
+    data = get_data()
+
+    # The student must already exist before we can update it.
+    if student_id not in data:
+        raise HTTPException(status_code=404, detail=f"student ID' {student_id} does not exist")
+
+    existing = data[student_id]
+
+    # Keep only the fields present in the request body (untouched fields are
+    # left out, so they keep their old values).
+    update = student_update.model_dump(exclude_unset=True)
+
+    # Merge the submitted fields into the stored record.
+    for key, value in update.items():
+        existing[key] = value
+
+    # Re-validate the final record against the full Student schema
+    # (also recomputes grade). Raises if the merged data is invalid.
+    student = Student(id=student_id, **existing)
+
+    # Persist without "id" (used as the dict key) and "grade" (recomputed).
+    data[student_id] = student.model_dump(exclude={"id", "grade"})
+    save_data(data)
+
+    return {"Message": "Student updated Successfully", "Updated Student": student_update}
+
+
+# ---------------------------------------------------------------------------
+# DELETE
+# ---------------------------------------------------------------------------
+@app.delete('/delete/{student_id}')
+def delete_student(
+    student_id: str = Path(..., description="The Id of the student", examples=["S001"])
+):
+    """
+    Delete a student by ID.
+
+    Args:
+        student_id (str): Path parameter identifying the student to remove.
+
+    Returns:
+        dict: A confirmation message.
+
+    Raises:
+        HTTPException 404: If no student exists with `student_id`.
+
+    Status codes:
+        200 - Student deleted successfully.
+        404 - Student not found.
+    """
+    data = get_data()
+
+    # Only delete a record that actually exists.
+    if student_id not in data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Student with id '{student_id}' not found"
+        )
+
+    # Remove the record and persist the updated file.
+    del data[student_id]
+    save_data(data)
+
+    return {"message": f"Student '{student_id}' deleted successfully"}
+
+    

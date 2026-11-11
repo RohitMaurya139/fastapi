@@ -1,0 +1,1 @@
+s=Student(id="S001",name="rohit maurya",age="23",marks=99,email="rohit123@gmail.com")
