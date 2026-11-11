@@ -7,11 +7,11 @@
         "marks": 85
     },
     "S003": {
-        "name": "Rohan Verma",
-        "age": 19,
-        "email": "rohan.verma@example.com",
+        "name": "Rohan Verma Kumar",
+        "age": 25,
         "course": "Python",
-        "marks": 67
+        "marks": 72,
+        "email": "rohan.verma@example.com"
     },
     "S004": {
         "name": "Ananya Iyer",

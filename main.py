@@ -17,6 +17,7 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI ,HTTPException, Path, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, computed_field, field_validator
 
 # Create the FastAPI application instance.
@@ -25,6 +26,24 @@ app = FastAPI(
     title="Student API",
     description="A beginner-friendly FastAPI example serving student data.",
     version="1.0.0",
+)
+
+# ---------------------------------------------------------------------------
+# CORS (Cross-Origin Resource Sharing)
+# ---------------------------------------------------------------------------
+# A browser blocks requests from a different origin (scheme + host + port)
+# unless the API explicitly allows it. The Streamlit frontend runs on a
+# different port (usually 8501), so it counts as a different origin.
+#
+# For local development we allow every origin. In production, replace "*"
+# with the exact frontend origins, for example:
+#     allow_origins=["https://students.example.com"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -470,7 +489,7 @@ class updateStudent(BaseModel):
     age     : int | None = Field(None, gt=0, le=100)
     course  : str | None = Field(None, max_length=50)
     marks   : int | None = Field(None, ge=0, le=100)
-    email   : EmailStr | None
+    email   : EmailStr | None = Field(None)
 
 
 @app.put('/update/{student_id}')
